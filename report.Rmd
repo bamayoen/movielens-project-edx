@@ -1,0 +1,1137 @@
+---
+title: "EdX Movielens Project"
+author: "Ayomide Bamgbose"
+date: "23/12/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("lubridate", repos = "http://cran.us.r-project.org")
+
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+
+if(!require(extrafont)) install.packages("extrafont", repos = "http://cran.us.r-project.org")
+if(!require(extrafontdb)) install.packages("extrafontdb", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(lubridate)
+
+library(data.table)
+library(gridExtra)
+
+library(extrafont)
+library(extrafontdb)
+
+font_import()
+loadfonts()
+
+options(digits = 5)
+
+```
+
+# Executive Summary
+
+This EdX project defines a linear regression machine learning model that will predict the rating of a given movie. The model will be created with the 10M MovieLens dataset. Due to the size of this dataset, an approximation of a linear effects model will be used to reduce the algorithm run-time. The `userId` and `movieId` predictors consistently had the highest impact on the RMSE of the model. The selected predictors for the linear regression model are `userId`, `movieId`, `movie_year` and `genres`. The RMSE of the selected model is **0.86475** when tested on the `edx_test` dataset, and **0.86516** when tested on the `validation` dataset. The equation of the linear effects model is $Y = \mu + x_u + x_i + x_{g} + x_{my}$, and a tuning parameter $\lambda = 4.5$ is used to regularize each predictor. The main limitation of this project is the usage of an approximation of the linear model.
+\newpage
+
+# Introduction
+
+The goal of this EdX project is to create a movie recommendation system for the [10M version of the MovieLens dataset](https://grouplens.org/datasets/movielens/10m/). An algorithm will be developed with this dataset after it has been cleaned, explored, and visualized. This algorithm will predict the rating a movie will receive; the minimum possible rating is 0/5 and the maximum possible rating is 5/5. Given the large amount of data in the MovieLens dataset, an approximation of the linear effects model (i.e., linear regression `lm()`) will be used to create the final algorithm. The root mean-squared error (RMSE) of the model will also be determined to validate the accuracy of the selected machine learning model.
+
+# Overview
+Before an algorithm can be created, the 10M MovieLens dataset must first be cleaned. After the data has been cleaned, a training set (`edx_train`), test set (`edx_test`), and validation set (`validation`) will be created:
+
+- **`edx_train`**: this data will be used to train the machine learning models
+- **`edx_test`**: this data will be used to perform tests (and determine the RMSE) on the machine learning models
+- **`validation`**: this data will be used to determine the final RMSE value with the selected machine learning model
+
+This model will approximate the linear effects machine learning model (`lm()`), where Y is the rating, $\mu$ is the average rating, $\epsilon$ is the error, and $x_1$ to $x_n$ are the effects of predictors $1$ to $n$: $Y = \mu + x_1 + x_2 + ... + x_n + \epsilon$. The 10M MovieLens dataset contains the following variables:
+
+- **`userId`**: the ID of the user giving the movie rating
+- **`movieId`**: the ID of the movie being rated
+- **`rating`**: the rating given by the user
+- **`timestamp`**: the time that the rating was given
+- **`title`**: the title of the movie being rated
+- **`genres`**: the genre(s) of the movie being rated
+
+The characteristics and relationships between each of these variables will be determined and visualized in the _Data Visualization_ section. After this, the effects and variability of each variable will be determined. If necessary, certain variables will be regularized before they are used in the prediction model. An additional variable (`movie_year`) will be added to the dataset (see _Data Cleaning_).
+
+A variety of variable-predictor combinations will be used for the linear model. The model with the lowest RMSE will be selected as the final model and will be used to determine the RMSE of the final hold-out test set, `validation`. The RMSE will be calculated with the following equation:
+
+$RMSE = \sqrt{\sum(ratings_{true} - ratings_{predicted}) / n}$
+
+The confidence interval $CI$ is defined as: $CI = \mu +- 2*SE$, where $\mu$ is the average and $SE$ is the standard error ($SE = s/\sqrt{n}$). In this case $s$ is the standard deviation and $n$ is the number of samples.
+
+**Note:** The following R packages will be used in this project: `tidyverse`, `caret`, `lubridate`, `gridExtra`, and `data.table`. The `extrafont` package will be used to format the plots.
+
+## Data Cleaning
+Since the data for this project is being imported from an [external source](http://files.grouplens.org/datasets/movielens/ml-10m.zip), it must be converted into a manageable data structure so that it can be used in R. The code for this process is provided below:
+
+```{r pre-processing}
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+```
+
+The final dataset is the `movielens` dataset. An additional predictor `movie_year` will be added to this data set with the `movie_to_year()` function (below). This function will extract the year of release of a movie by taking a substring of each row of the `title` column. Since each year is four digits long and is always at the end of the `title` string, it can be extracted as the last four digits of each movie `title` (ignoring the last end bracket ")"):
+
+```{r movie_to_year}
+movie_to_year <- function(movie){
+  temp <- substr(movie, nchar(movie)-4, nchar(movie)-1)
+  as.numeric(temp)
+}
+
+# Example:
+movie_to_year("Star Trek: Generations (1994)")
+```
+
+From this dataset, the `edx` and `validation` datasets will be formed. The `validation` set will be composed of 10% of the `movielens` dataset. The `edx_test` and `edx_train` datasets will be created from the `edx` dataset, and the `edx_test` set will contain 20% of the `edx` dataset. These steps are conducted after setting the seed to **1** (to ensure that the response is consistent). 
+
+```{r edx_validation_test_train, echo=FALSE}
+# update movielens dataset
+movielens <- movielens %>% mutate(movie_year = movie_to_year(title))
+
+## Create validation/edx set
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+# Clear workspace
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+## Create edx_train/edx_test sets
+# Test set will be 20% of edx data
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.2, list = FALSE)
+edx_train <- edx[-test_index,]
+temp_test <- edx[test_index,]
+
+# Make sure userId and movieId in temp_test set are also in edx_train set
+edx_test <- temp_test %>% 
+  semi_join(edx_train, by = "movieId") %>%
+  semi_join(edx_train, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp_test, edx_test)
+edx_train <- rbind(edx_train, removed)
+
+# Clear workspace
+rm(temp_test, removed, test_index)
+
+```
+
+The variables (i.e., predictors) in the `edx_train`, `edx_test` and `validation` sets are:
+```{r data_columns, echo=FALSE}
+str(edx_train)
+```
+
+# Methods
+Although the `movielens` dataframe has been split into a training set (`edx_train`) and two testing sets (`edx_test` and `validation`), each dataset has a large amount of data (see _Data Exploration_). The linear effects (i.e., linear regression) model is usually implemented with the `lm()` function. If we were to use this function, the run-time would be too high due to the size of the dataset and number of unique entries in each predictor (see _Data Exploration_). Due to this, an estimation of this linear model will be used instead: $Y = \mu + x_u + x_m + x_g + x_t + x_{my} + \epsilon$, where $Y$ is the predicted rating, $\mu$ is the average rating, $x_u$ is the user (`userId`) effect, $x_m$ is the movie (`movieId`, `title`) effect, $x_g$ is the genre (`genres`) effect, $x_t$ is the time (`timestamp`) effect, $x_{my}$ is the year (`movie_year`) effect and $\epsilon$ is the error. The predictors that will be used in the final model will be determined by considering their effect on the movie rating and RMSE of the prediction model.
+
+## Data Exploration
+The dimension of the `validation`, `edx_test` and `edx_train` sets are defined as:
+```{r data_dimensions, echo=FALSE}
+data.frame(data_set = c("validation", "edx_test", "edx_train"), 
+           row_dimension = c(dim(validation)[1], dim(edx_test)[1], dim(edx_train)[1]),
+           col_dimension = c(dim(validation)[2], dim(edx_test)[2], dim(edx_train)[2]))
+
+```
+
+Further analysis will be conducted on the `edx_train` set only because this dataset will be used to create and train the machine learning model.
+
+### Rating Distribution
+The rating distribution of the `edx_train` set is given in Figure 1 below:
+
+```{r rating_distribution, echo=FALSE}
+
+unique_ratings <- edx_train %>% group_by(rating) %>%
+  summarise(n = n()) 
+unique_ratings <- unique_ratings %>% mutate(percentage = (n / sum(n))*100) %>%
+  arrange(desc(percentage))
+
+unique_ratings %>%
+  ggplot(aes(rating, n)) +
+  geom_bar(stat = "identity") +
+  xlab("Rating") +
+  ylab("Number of Ratings") +
+  ggtitle("Figure 1. Rating Distribution (in the training set)") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+```
+
+From this figure, it is evident that the top 3 most common ratings are 4/5, 3/5, and 5/5, where 28.8% of all ratings are 4/5, 23.6% of all ratings are 3/5, and 15.5% of all ratings are 5/5. The `rating` variable is not normally distributed.
+  
+### Genres, Users, and Movies
+The number of distinct users (`userId`), movies (`movieId`), and genres (`genres`) in the `edx_train` dataset are given in the table before:
+
+```{r, echo=FALSE}
+edx_train %>% summarise(n_movies = n_distinct(movieId), n_users = n_distinct(userId), n_genres = n_distinct(genres))
+```
+
+From Figure 2, below, it follows that the majority of the movies in the `edx_train` dataset were released between 1990 and 2010:
+
+```{r movie_year, echo=FALSE}
+# edx_train - movie_year distribution
+edx_train %>% group_by(movie_year) %>%
+  summarise(n = n(), avg_rating = mean(rating)) %>%
+  ggplot(aes(x=movie_year, y=n)) +
+  geom_bar(stat = "identity", col="black") +
+  ylab("Number of Movies") +
+  xlab("Movie Release Year") +
+  ggtitle("Figure 2. Number of Movies Released vs Year of Release") +
+  theme(text = element_text(family = "Times New Roman", size = 10))
+```
+
+## Data Visualization
+This section will be conducted on the `edx_train` dataset, and will be used to:
+
+- Learn more about the behaviour of each predictor
+- Find key trends and identify the relationship between each predictor and the movie rating
+
+### Genres (`genres`)
+The `genres` predictor is composed of combinations of the unique genres in the `edx_train` dataset. Some movies have multiple genres, and some movies have only one genre. For example:
+
+```{r, echo=FALSE}
+edx_train %>% select(title, genres) %>% slice(1,14)
+```
+
+There are 19 unique genres in the `edx_train` dataset, and the number of movies per genre are given in Figure 3, below:
+
+```{r genres_visualization, echo=FALSE}
+## edx_train: genres
+# find the number of movies in each genre (distinct)
+movies <- edx_train %>% distinct(movieId, .keep_all = TRUE)
+unique_genres_list <- c("Action", "Adventure", "Animation", "Children", "Comedy", "Crime",
+                   "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "Musical",
+                   "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western", "IMAX")
+
+n_movies_per_genre <- sapply(unique_genres_list, function(g) {
+  sum(str_detect(movies$genres, g))
+})
+
+# make genres and the number of movies per genre into a data frame
+movies_per_genre <- data.frame(genres = unique_genres_list, n = n_movies_per_genre)
+movies_per_genre %>% ggplot(mapping = aes(reorder(genres, -n), n)) +
+  geom_bar(stat = "identity") +
+  xlab("Genre") +
+  ylab("Number of Movies") +
+  ggtitle("Figure 3. Number of Movies per Genre") +
+  theme(axis.text.x = element_text(angle = 45)) +
+  theme(text = element_text(family = "Times New Roman", size = 10))
+
+```
+
+The most common genres in the `edx_train` dataset are `Drama`, `Comedy`, and `Thriller`. The least common genres are `Western`, `IMAX`, and `Film-Noir`. Although there are 19 unique genres, there are actually `797` unique combinations of genres in the `edx_train` dataset. Considering all the genre combinations with more than 1000 ratings, the following distribution is observed:
+
+```{r genres_visualization_2, echo=FALSE}
+
+unique_genres <- edx_train %>% group_by(genres) %>% 
+  summarize(n_ratings = n(), avg_rating = mean(rating), se = sd(rating)/sqrt(n_ratings))
+
+unique_genres %>%
+  filter(n_ratings > 1000) %>%
+  ggplot(data = .) +
+  geom_bar(aes(x=genres, y=avg_rating), stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_errorbar(aes(x=genres, ymin=avg_rating - 2*se, ymax = avg_rating + 2*se)) +
+  xlab("Genre(s)") +
+  ylab("Average Rating") +
+  ggtitle("Figure 4. Rating Distribution per Genre") +
+  theme(text = element_text(family = "Times New Roman", size = 10))
+
+```
+
+Since there are so many genre combinations, this plot is very difficult to interpret. By counting the number of genres per movie (using only the **unique** movies in the dataset), the following can be shown:
+```{r unique_genres, echo=FALSE}
+
+# Count the number of genres each movie has
+n_genres <- str_count(movies$genres, pattern = "\\|") + 1
+n_genres <- table(n_genres) # see how many genres each rated movie is defined with
+n_genres
+
+```
+
+In other words, by considering only the first **three** genres of each movie, we can account for `90.9%` of all movies in the `edx_train` dataset (i.e., `90.9%` of all movies in the `edx_train` dataset have 1, 2, or 3 distinct genres).
+
+Three "predictors" can now be added to the `edx_train` dataframe: `genre_1`, `genre_2` and `genre_3`. By separating the _genres_ column along each **"|"**, the first three genres of each movie can be determined. In the case that a movie does not have up to three genres, the empty values are filled with the string `"(no genre listed)"`. Now, `edx_train` is defined as:
+
+```{r separate_genres, echo=FALSE}
+# Get the first three genres of each movie
+genre_columns <- paste("genre", 1:3, sep = "_")
+no_genre <- "(no genre listed)"
+t <- edx_train %>% separate(genres, sep = "\\|", into = genre_columns, extra = "drop", fill = "right")
+t <- t %>% replace_na(list(genre_1 = no_genre, genre_2 = no_genre, genre_3 = no_genre))
+
+str(t)
+```
+
+In other words, the effect $x_g$ is now defined as: $x_g = x_{g1} + x_{g2} + x_{g3}$, where $x_{g1}$, $x_{g2}$ and $x_{g3}$ are the effects for `genre_1`, `genre_2`, and `genre_3`, respectively.
+
+#### Genre 1, 2, and 3  
+
+As shown in Figure 5 below, each genre has its own average rating. Excluding the movies with genre "`(no genres listed)`" or "`IMAX`", all genres have very low variability. The "`(no genres listed)`" are "`IMAX`" the genres with the lowest number of ratings, thus they will cause a lot of noise in the data. Ignoring these genres, the confidence intervals of all other genres in this dataset do not overlap. This suggests that the first genre of a movie has a statistically significant effect on its rating.
+
+```{r genre_123, echo=FALSE}
+
+# plot the rating distribution across genres for genre_1
+genre_1_plot <- t %>% group_by(genre_1) %>% 
+  summarise(n = n(), avg = mean(rating), se = sd(rating)/sqrt(n)) %>%
+  ggplot(data = .) +
+  geom_bar(aes(x=genre_1, y=avg), stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_errorbar(aes(x=genre_1, ymin=avg - 2*se, ymax = avg + 2*se)) +
+  xlab("First Genre") +
+  ylab("Average Rating") +
+  ggtitle("Figure 5. Ratings, Genre 1") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# plot the rating distribution across genres for genre_2
+genre_2_plot <- t %>% group_by(genre_2) %>% 
+  summarise(n = n(), avg = mean(rating), se = sd(rating)/sqrt(n)) %>%
+  ggplot(data = .) +
+  geom_bar(aes(x=genre_2, y=avg), stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_errorbar(aes(x=genre_2, ymin=avg - 2*se, ymax = avg + 2*se)) +
+  xlab("Second Genre") +
+  ylab("Average Rating") +
+  ggtitle("Figure 6. Rating, Genre 2") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# plot the rating distribution across genres for genre_3
+genre_3_plot <- t %>% group_by(genre_3) %>% 
+  summarise(n = n(), avg = mean(rating), se = sd(rating)/sqrt(n)) %>%
+  ggplot(data = .) +
+  geom_bar(aes(x=genre_3, y=avg), stat = "identity") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_errorbar(aes(x=genre_3, ymin=avg - 2*se, ymax = avg + 2*se)) +
+  xlab("Third Genre") +
+  ylab("Average Rating") +
+  ggtitle("Figure 7. Ratings, Genre 3") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# no regions of overlap in all three graphs -> statistically significant effect
+grid.arrange(genre_1_plot, genre_2_plot, genre_3_plot, ncol=3)
+
+```
+
+In a similar manner to the plot for the first genre, Figure 6 shows that the confidence intervals for each genre in `genre_2` do not overlap, indicating that the second genre of a movie has a statistically significant effect on its average rating.* The genre with the highest variability in this plot is the "`IMAX`" genre.
+
+In a similar manner to the first and second genres, Figure 7 shows that the confidence intervals for each genre do not overlap, indicating that the third genre of a movie has a statistically significant effect on its average rating.* The genres with the highest variability in this case are the "`Documentary`" and "`IMAX`" genres.
+
+*These statements will be confirmed in the _Prediction Models_ section of the report.
+
+### Users (`userId`)
+There are 69,878 unique users in the `edx_train` dataset. The distribution of the number of ratings given by users, filtered to include only users with more than 500 total ratings, is provided in Figure 9 below. From this plot, it is evident that almost 100% of the users in the `edx_train` set have given less than 2000 total movie ratings.
+
+The average movie rating given per user is presented in Figure 8. From this figure, it is evident that the most common (rounded) rating is 3.5/5, and the least common ratings are at the edges of the rating scale (i.e., 0-2/5 or 5/5). 42.6% of the average user ratings are 3.5/5, and less than 1% of the average user ratings are less than 2/5 or equal to 5/5. 
+
+Figure 9 represents the relationship between the average rating given to a movie (by a unique user) and the number of ratings that user has given. From this figure, it is evident that the more ratings a user gives, the more "average" their ratings are: "average", in this case, meaning between 2/5 and 4/5. However, when a user has rated fewer movies, their ratings tend to be either very high (i.e., >4/5) or very low (i.e., <2/5). The impact of this observation will be considered in more detail in the _Predictors:Effects_ section of this report.
+
+```{r user_visualization1, echo=FALSE}
+## edx_train: userId (users)
+unique_users <- edx_train %>% group_by(userId) %>%
+  summarise(n = n(), avg_rating = mean(rating), rounded_rating = round(avg_rating*2)/2)
+
+# number of users vs average rating
+user_plot1 <- unique_users %>%
+  ggplot(aes(rounded_rating)) +
+  geom_histogram(bins = 10, col = "black") +
+  xlab("Average Rating") +
+  ylab("Number of Users") +
+  ggtitle("Figure 9. Number of Users versus Average Movie Rating") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# number of ratings per user (distribution): most users have given between 500 and 2000 ratings
+user_plot2 <- unique_users %>% filter(n > 500) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 20, col = "black") +
+  xlab("Number of Ratings") +
+  ggtitle("Figure 8. Number of Ratings per User") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# avg rating versus number of ratings given by user
+user_plot3 <- unique_users %>%
+  ggplot(aes(rounded_rating, n)) +
+  geom_point(alpha = 0.5) +
+  xlab("Average Rating (rounded)") +
+  ylab("Number of Ratings") +
+  ggtitle("Figure 10. Average Rating versus number of Ratings per User") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# commbine all user plots
+grid.arrange(user_plot2, user_plot1, user_plot3)
+```
+
+Figure 10 shows a similar distribution to Figure 8: the more ratings a user gives, the more "average" (between 3/5 and 4/5) their rating is. Users with a very low number of ratings tend to give either very high or very low ratings (i.e., less than 2/5 or 5/5). Since the `userId` effect already has some variability (as shown in the figures above), it may need to be regularized (i.e., penalized least squares) in the linear model.
+
+**Note:** Each rating average is rounded to the nearest 0.5 by multiplying the average rating by two, rounding it with the `round()` function in R, and dividing the result by two. This data transformation is conducted so that the plots in Figure 8 and 9 are easier to create.
+
+### Movies (`movieId`, `title`, `movie_year`)
+In the same way as the `userId` variable: 
+
+```{r movie_visualization1, echo=FALSE}
+
+## edx_train - movieId/title
+unique_movies <- edx %>% group_by(movieId, title) %>%
+  summarise(n = n(), avg_rating = mean(rating), rounded_rating = round(avg_rating*2)/2)
+
+# number of movies vs average rating
+movie_plot1 <- unique_movies %>%
+  ggplot(aes(rounded_rating)) +
+  geom_histogram(bins = 10, col = "black") +
+  xlab("Average Rating") +
+  ylab("Number of Movies") +
+  ggtitle("Figure 12. Number of Movies versus Average Movie Rating") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+movie_plot2 <- unique_movies %>% filter(n > 200) %>%
+  ggplot(aes(n)) +
+  geom_histogram(bins = 20, col = "black") +
+  xlab("Number of Ratings") +
+  ggtitle("Figure 11. Number of Ratings per Movie") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# avg rating versus number of ratings given for movie
+movie_plot3 <- unique_movies %>%
+  ggplot(aes(rounded_rating, n)) +
+  geom_point(alpha = 0.5) +
+  xlab("Rounded Rating") +
+  ylab("Number of Ratings") +
+  ggtitle("Figure 13. Average Rating vs Number of Ratings per Movie") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# combine all movie plots
+grid.arrange(movie_plot2, movie_plot1, movie_plot3)
+
+```
+
+Figure 11 shows that almost 100% of all movies have less than 10,000 total ratings. By Figure 12, it follows that the most common movie rating is 3.5/5. Figure 13 shows that the more ratings a movie has, the more "average" its rating is (i.e., between 3/5 and 4/5). However, movies with very few ratings tend to have extremely low or high ratings (i.e., <2/5 or 5/5). The `movieId` effect will likely cause variability in the linear model: regularization (i.e., penalized least squares) may be required to deal with the extreme cases.
+
+Figure 14, below, shows that there is a clear relationship between the release year of a movie (`movie_year`) and its rating. Movies released between 1910 and 1970 tend to have higher average ratings (ranging from 3.6/5 to 5/5). The movies released after 1970 tend to have a lower rating (<3.6/5), and show a trend of consistent decrease in the average rating:
+
+```{r movie_year2, echo=FALSE}
+## edx_train - movie_year, plot relationship between year a movie was released in and its rating
+edx_train %>% group_by(movie_year) %>%
+  summarise(n = n(), avg_rating = mean(rating)) %>%
+  ggplot(aes(x=movie_year, y=avg_rating)) +
+  geom_point() +
+  geom_smooth() +
+  xlab("Movie Release Year") +
+  ylab("Average Rating") +
+  ggtitle("Figure 14. Average Rating vs Movie Release Year") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+```
+
+The trendline of the average rating versus movie release year plot (Figure 14) is created with the `geom_smooth()` function and `lm()` formula.
+
+### Time (timestamp)
+The relationship between the time a rating was made (`timestamp`) and the given rating is provided in the figure below. From this plot, it is evident that the time predictor $x_d$ can be described in terms of a non-linear and time-dependent function. In other words: $x_d \rightarrow f(x_d)$, where $f(x_d)$ is a smooth function of $x_d$.
+
+```{r time_visualization, echo=FALSE}
+
+dates <- edx_train %>% 
+  mutate(date = as_datetime(timestamp)) %>%
+  mutate(date = round_date(date, unit = "week")) # date in weeks
+
+dates %>%
+  group_by(date) %>%
+  summarize(rating = mean(rating)) %>%
+  ggplot(aes(date, rating)) +
+  geom_point() +
+  geom_smooth() +
+  xlab("Date of Rating") +
+  ylab("Rating") +
+  ggtitle("Figure 15. Date of Rating versus Rating Given") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# clear workspace
+rm(genre_1_plot, genre_2_plot, genre_3_plot, movie_plot1, movie_plot2, movie_plot3,
+   user_plot1, user_plot2, user_plot3)
+
+```
+
+This plot has been fitted with the `loess()` function. Considering the fitted blue `geom_smooth()` function, there is very little variation in the projected rating in this plot. It is likely that this predictor will not have much of an effect on the final rating given to a movie, but this will be determined in the _Predictors: Effects_ section of the report.
+
+# Analysis
+Considering the visualizations conducted in the previous section, the effects and impacts of each predictor in the `edx_train` will be analyzed in terms of the linear effects model: $Y = \mu + x_u + x_m + x_g + x_t + x_{my} + \epsilon$, where $x_g = x_{g1} + x_{g2} + x_{g3}$. Before the effects of each predictor can be analyzed, the average rating across all predictors ($\mu$) is given by:
+
+```{r mu}
+mu <- mean(edx_train$rating)
+mu
+```
+
+## Predictors
+### Effects
+For the purpose of this report, "effects" will be defined as the deviation of the rating from $\mu$. For example, for the `userId` predictor, its effect ($x_u$) is defined as: $x_u = Y - \mu$, where this formula is defined for a specific rating $Y$. Since an approximation of the linear effects model will be used, this effect $x_u$ will be the _average_ effect of all ratings given by a specific user. 
+
+Figures 16 to 19 show the `userId` effect, `movieId` effect, `movie_year` effect, and `timestamp` effect, respectively. The `userId` effect is defined as $x_u = Y - \mu$ (grouped by unique users), `movieId` effect is defined as $x_i = Y - \mu$ (grouped by unique movies), `movie_year` effect is defined as $x_{my} = Y - \mu$ (grouped by release year), `timestamp` effect is defined as $x_d = Y - \mu$ (grouped by unique weeks). 
+
+```{r effects_plots, echo=FALSE}
+
+## userId bias, b_u
+# this plot shows that there is variation in the deviation of avg user ratings from the mean mu
+# variability across users
+user_bias <- edx_train %>% group_by(userId) %>% 
+  summarise(b_u = sum(rating - mu)/n()) %>%
+  ggplot(aes(b_u)) +
+  geom_histogram(bins = 10, col = "black") +
+  xlab("User Effect, b_u") +
+  ggtitle("Figure 16. User Effect, b_u") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+## movieId/title bias, b_i
+# this plot shows a similar effect as userId
+# variability across movies
+movie_bias <- edx_train %>% group_by(movieId) %>%
+  summarise(b_i = sum(rating - mu)/n()) %>%
+  ggplot(aes(b_i)) +
+  geom_histogram(bins = 10, col = "black") +
+  xlab("Movie Effect, b_i") +
+  ggtitle("Figure 17. Movie Effect, b_i") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+## movie_year bias, b_my
+movie_year_bias <- edx_train %>% group_by(movie_year) %>%
+  summarise(b_my = sum(rating - mu)/n()) %>%
+  ggplot(aes(b_my)) +
+  geom_histogram(bins = 10, col = "black") +
+  xlab("Movie Year Effect, b_my") +
+  ggtitle("Figure 19. Movie Year Effect, b_my") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+## date/timsetamp bias, d_ui
+unique_dates <- dates %>%
+  group_by(date) %>%
+  summarise(d_ui = sum(rating - mu)/n(), n = n(), avg_rating = mean(rating)) 
+
+time_bias <- unique_dates %>%
+  ggplot(aes(d_ui)) +
+  geom_histogram(bins = 20, col = "black")+
+  xlab("Date Effect, d_ui") +
+  ggtitle("Figure 18. Date Effect, d_ui") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# combine and plot each predictor bias
+grid.arrange(user_bias, movie_bias, time_bias, movie_year_bias)
+rm(user_bias, movie_bias, time_bias, movie_year_bias)
+
+```
+
+From these plots, it is evident that all of these predictors have an effect on the rating a given movie will receive. The effects of the `userId` and `movieId` predictors are the most profound: they range from -3 to 2. The effect of the `timestamp` predictor, however, only ranges from -0.25 to 0.25 for the majority of the dataset, confirming that the `timestamp` predictor has a very low effect on the rating a movie receives. The effect of the `timestamp` predictor is only >0.25 in extreme cases (i.e., these effects will have very high variability). The effect of the `movie_year` predictor varies from -0.2 to 0.6.
+
+The effects of the `genres`, `genre_1`, `genre_2`, and `genre_3` predictors are given in the figures below. The `genres` effects is defined as $x_g = Y - \mu$ (grouped by unique genres), `genre_1` effects is defined as $x_{g1} = Y - \mu$ (grouped by unique genre_1), `genre_2` effects is defined as $x_{g2} = Y - \mu$ (grouped by unique genre_2), and `genre_3` effects is defined as $x_{g3} = Y - \mu$ (grouped by unique genre_3).
+
+```{r effects_plots2, echo=FALSE}
+
+## genre
+# g_ui can be described as the sum of the effects across the first three genres
+# note: put the equation for the confidence interval into the report
+
+# genres
+genres_bias <- edx_train %>% group_by(genres) %>%
+  summarise(g_ui = sum(rating - mu)/ n()) %>%
+  ggplot(aes(g_ui)) +
+  geom_histogram(bins = 20, col = "black") +
+  xlab("Genre Effect, g_ui") +
+  ggtitle("Figure 20. Genre Effect") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# genre_1
+g_ui1 <- t %>% group_by(genre_1) %>%
+  summarise(g_ui = sum(rating - mu)/n()) 
+
+genre1_bias <- g_ui1 %>%
+  ggplot(aes(g_ui)) +
+  geom_histogram(bins = 20, col = "black") +
+  xlab("First Genre Effect, g_ui1") +
+  ggtitle("Figure 21. First Genre Effect") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# genre_2
+g_ui2 <- t %>% group_by(genre_2) %>%
+  summarise(g_ui = sum(rating - mu)/n())
+
+genre2_bias <- g_ui2 %>%
+  ggplot(aes(g_ui)) +
+  geom_histogram(bins = 20, col = "black") +
+  xlab("Second Genre Effect, g_ui2") +
+  ggtitle("Figure 22. Second Genre Effect") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# genre_3
+g_ui3 <- t %>% group_by(genre_3) %>%
+  summarise(g_ui = sum(rating - mu)/n())
+
+genre3_bias <- g_ui3 %>%
+  ggplot(aes(g_ui)) +
+  geom_histogram(bins = 20, col = "black") +
+  xlab("Third Genre Effect, g_ui3") +
+  ggtitle("Figure 23. Third Genre Effect") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+# combine all genre bias plots
+grid.arrange(genres_bias, genre1_bias, genre2_bias, genre3_bias)
+
+# clear workspace
+rm(genre1_bias, genre2_bias, genre3_bias, genres_bias)
+
+```
+
+From these plots, it is evident that each all of the genre predictors have an effect on the rating given to a movie. The `genres` predictor has the greatest effect on the rating of a movie: its effect ranges from -2 to 1.5. The `genre_1` and `genre_2` effects also have significant effects, but the `genre_3` has a very low effect on the rating (it ranges from -0.25 to 0.25). In other words, the `genres`, `genre_1` and `genre_2` have the greatest effect on the rating given to a movie. 
+
+### Variability: Is Regularization Required?
+
+In order to reduce the effect of variability, penalized least squares (regularization) will be tested for the following variables:
+
+- `userId`: There is a significant variation in the `userId` effect on a movie's rating (Figure 16)
+- `movieId`: There is a significant variation in the `movieId` effect on a movie's rating (Figure 17)
+- `movie_year`: There is a significant variation in the `movie_year` effect on a movie's rating (Figure 18)
+- `genre_1`: The `(no genre listed)` and `IMAX` genres have high variability (Figure 21)
+
+In addition, the highest and lowest ratings are given by users with the less than 150 total ratings. However, the range of ratings given by users is:
+```{r}
+range(unique_users$n)
+```
+
+In the same way, the highest and lowest ratings are given to movies with less than 200 total ratings. However, the range of ratings given to movies is:
+```{r}
+range(unique_movies$n)
+```
+
+Therefore the `userId` and `movieId` predictors both have noisy estimates. This noise will increase the RMSE of the linear model, therefore regularization will be required to reduce the "effect" of these extreme cases (i.e., very high or very low ratings). 
+
+Penalized least squares will be implemented with the penalty term $\lambda$. Instead of calculating the estimates as the average of $x_i = Y - \mu$ (for some predictor $i$), they will be calculated with the following equation: 
+
+$x_i = (1/({\lambda+n_i}))\sum({Y-\mu})$. 
+
+The value of $\lambda$ will be selected through cross-validation (see _Regularized Models_ section).
+
+# Results
+## Prediction Models
+The types of linear effects models will be considered in this report:
+
+1. Naive ($Y = \mu$)
+2. Non-regularized
+3. Regularized (i.e., penalized least squares)
+
+The root mean squared error (RMSE) will be used to determine the effectiveness of the intermediate models. The selected models will be used to estimate the ratings of the data in the `edx_test` dataset. As soon as a final model has been selected, the RMSE will be calculated by running the model on the `validation` dataset. The RMSE equation is defined as: $RMSE = \sqrt{\sum(ratings_{true} - ratings_{predicted}) / n}$.
+
+```{r rmse_eq, echo=FALSE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+### Naive Model
+This model will perform predictions with the following linear equation: $Y = \mu$. The root mean squared error of this model is:
+
+```{r naive_rmse}
+## Naive Model (no predictors used)
+naive_model_RMSE <- RMSE(edx_test$rating, mu)
+naive_model_RMSE
+```
+
+This model will be used as a baseline to measure the improvement of models with additional predictors. 
+
+### Un-Regularized Models
+#### Single Effect Models
+
+Single effect models apply the rating average and **one** additional predictor/effect to the linear model. Considering the general linear model: $Y = \mu + x_u + x_m + x_g + x_t + x_{my} + \epsilon$, the RMSE of each single effect model is given by:
+
+```{r single_effect1, echo=FALSE}
+
+## Separate genres of test set into first 3 genres
+u <- edx_test %>% separate(genres, sep = "\\|", into = genre_columns, extra = "drop", fill = "right")
+u <- u %>% replace_na(list(genre_1 = no_genre, genre_2 = no_genre, genre_3 = no_genre))
+
+# userId (b_u) only
+b_u <- edx_train %>% group_by(userId) %>% 
+  summarise(b_u = sum(rating - mu)/n())
+user_pred <- mu + edx_test %>% left_join(b_u, by = "userId") %>% pull(b_u)
+user_rmse <- RMSE(edx_test$rating, user_pred)
+
+# movieId (b_i) only
+b_i <- edx_train %>% group_by(movieId) %>% 
+  summarise(b_i = sum(rating - mu)/n())
+movie_pred <- mu + edx_test %>% left_join(b_i, by = "movieId") %>% pull(b_i)
+movie_rmse <- RMSE(edx_test$rating, movie_pred)
+
+# genre (g_ui)
+g_ui <- edx_train %>% group_by(genres) %>%
+  summarise(g_ui = sum(rating - mu)/n())
+genre_pred <- mu + edx_test %>% left_join(g_ui, by = "genres") %>% pull(g_ui)
+genre_rmse <- RMSE(edx_test$rating, genre_pred)
+
+# genre_1
+genre_1_pred <- mu + u %>% left_join(g_ui1, by = "genre_1") %>% pull(g_ui)
+genre1_rmse <- RMSE(u$rating, genre_1_pred)
+
+# genre_2
+genre_2_pred <- mu + u %>% left_join(g_ui2, by = "genre_2") %>% pull(g_ui)
+genre2_rmse <- RMSE(u$rating, genre_2_pred)
+
+# genre_3
+genre_3_pred <- mu + u %>% left_join(g_ui3, by = "genre_3") %>% pull(g_ui)
+genre3_rmse <- RMSE(u$rating, genre_3_pred)
+
+# timestamp/date (d_ui) only
+date_pred <- mu + edx_test %>% mutate(date = as_datetime(timestamp)) %>%
+  mutate(date = round_date(date, unit = "week")) %>%
+  left_join(unique_dates, by = "date") %>% pull(d_ui)
+date_rmse <- RMSE(edx_test$rating, date_pred) # 1.0562
+
+# movie_year only
+b_my <- edx_train %>% group_by(movie_year) %>%
+  summarise(b_my = mean(rating - mu))
+
+movie_year_pred <- mu + edx_test %>% mutate(movie_year = movie_to_year(title)) %>%
+  left_join(b_my, by="movie_year") %>% pull(b_my)
+movie_year_rmse <- RMSE(edx_test$rating, movie_year_pred)
+
+# tabulate results
+data.frame(predictor = c("none (naive)","userId", "movieId", "genres", "genre_1", "genre_2", "genre_3", "timestamp", "movie_year"),
+           model_equation = c("Y = mu", "Y = mu + x_u", "Y = mu + x_i", "Y = mu + x_g",
+                              "Y = mu + x_g1", "Y = mu + x_g2", "Y = mu + x_g3", "Y = mu + x_t", "Y = mu + x_my"),
+           RMSE = c(naive_model_RMSE, user_rmse, movie_rmse, genre_rmse, genre1_rmse, genre2_rmse, genre3_rmse, date_rmse, movie_year_rmse))
+
+# clear workspace
+rm(user_pred, user_rmse, movie_pred, movie_rmse, genre_pred, genre_rmse, genre_1_pred, genre1_rmse,
+   genre_2_pred, genre2_rmse, genre_3_pred, genre3_rmse, movie_year_pred, movie_year_rmse,
+   date_pred, date_rmse)
+
+```
+
+From the table above, the `userId` and `movieId` effects models provide the lowest RMSE. It follows that the `userId` and `movieId` predictors have the greatest impact on the RMSE of the model. The `genres` predictor has a greater overall effect on the RMSE when compared to the separated genres (i.e., `genre_1`, `genre_2`, `genre_3`). The `movie_year` and `genre_1` predictors also have a significant impact on the RMSE of the model. The `timestamp` and `genre_3` predictors have the lowest impact on the RMSE of the model.
+
+If a single-effect model had to be selected, the `movieId` model would be chosen.
+
+#### Ensemble (multi-effect) Models  
+
+Since the `timestamp` predictor has the lowest impact on the RMSE of the linear model, it will not be used in the multi-effect models. 
+
+```{r multi_effect1, echo=FALSE}
+
+# userId and movieId
+b_i_u <- edx_train %>% group_by(movieId) %>% 
+  left_join(b_u, by = "userId") %>%
+  summarise(b_i = sum(rating - mu - b_u)/n())
+user_movie_pred <- mu + edx_test %>% left_join(b_u, by = "userId") %>% 
+  left_join(b_i_u, by = "movieId") %>% 
+  mutate(pred = b_u + b_i) %>% pull(pred)
+user_movie_rmse <- RMSE(edx_test$rating, user_movie_pred) # 0.88263
+
+# genre_1, genre_2, genre_3
+# Since there are max 20 unique genres per column, the lm() function can be used
+genre_123_pred <- lm(rating ~ as.factor(genre_1) + as.factor(genre_2) + as.factor(genre_3), data = t)
+genre_123_rmse <- RMSE(u$rating, predict(genre_123_pred, u)) # 1.0383
+
+# userId, movieId, genres
+g_ui <- edx_train %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  group_by(genres) %>%
+  summarise(g_ui = sum(rating - b_u - b_i - mu)/n())
+pred <- mu + edx_test %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  left_join(g_ui, by = "genres") %>%
+  mutate(y = b_u + b_i + g_ui) %>%
+  pull(y)
+user_movie_genres_rmse <- RMSE(edx_test$rating, pred) # 0.88263
+
+# userId, movieId, movie_year
+b_u_i_my <- edx_train %>% left_join(b_i_u, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  group_by(movie_year) %>%
+  summarise(b_my = sum(rating - b_u - b_i - mu)/n())
+pred <- mu + edx_test %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  left_join(b_u_i_my, by = "movie_year") %>%
+  mutate(y = b_u + b_i + b_my) %>%
+  pull(y)
+user_movie_movieyear_RMSE <- RMSE(edx_test$rating, pred) # 0.88263
+
+# userId, movieId, genre_1, genre_2, genre_3
+g_ui_1 <- t %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  group_by(genre_1) %>%
+  summarise(g_ui1 = sum(rating - mu - b_u - b_i)/n())
+g_ui_2 <- t %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  left_join(g_ui_1, by = "genre_1") %>%
+  group_by(genre_2) %>%
+  summarise(g_ui2 = sum(rating - mu - b_u - b_i - g_ui1)/n())
+g_ui_3 <- t %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  left_join(g_ui_1, by = "genre_1") %>%
+  left_join(g_ui_2, by = "genre_2") %>%
+  group_by(genre_3) %>%
+  summarise(g_ui3 = sum(rating - mu - b_u - b_i - g_ui1 - g_ui2)/n())
+
+# effects of g_ui_2 and g_ui_3 are to the 10^-19 power (basically 0)
+
+pred <- mu + u %>% left_join(b_u, by = "userId") %>%
+  left_join(b_i_u, by = "movieId") %>%
+  left_join(g_ui_1, by = "genre_1") %>%
+  left_join(g_ui_2, by = "genre_2") %>%
+  left_join(g_ui_3, by = "genre_3") %>%
+  mutate(y = b_u + b_i + g_ui1 + g_ui2 + g_ui3) %>%
+  pull(y)
+user_movie_genre123_rmse <- RMSE(u$rating, pred) # 0.88262
+
+# tabulate results
+d <- data.frame(predictors = c("userId, movieId", "genre_1, genre_2, genre_3", "userId, movieId, genres", "userId, movieId, movie_year", "userId, movieId, genre_1, genre_2, genre_3"),
+           model_equation = c("Y = mu + x_u + x_i", "Y = mu + x_g1 + x_g2 + x_g3", "Y = mu + x_i + x_u + x_g", "Y = mu + x_i + x_u + x_my", "Y = mu + x_i + x_u + x_g1 + x_g2 + x_g3"),
+           RMSE = c(user_movie_rmse, genre_123_rmse, user_movie_genres_rmse, user_movie_movieyear_RMSE, user_movie_genre123_rmse))
+
+d[,2:3]
+
+# clear workspace
+rm(user_movie_rmse, genre_123_rmse, user_movie_genres_rmse, user_movie_movieyear_RMSE, 
+   user_movie_genre123_rmse, pred, user_movie_pred, genre_123_pred)
+
+```
+
+From the multi-effect models, it follows that the lowest RMSEs are evident in the models that use a combination of the `userId`, `movieId`, `movie_year` and `genres` predictors. Since there are only 19 unique genres in the `genre_1`, `genre_2` and `genre_3` predictors, the `lm()` function is used in the model $Y = \mu + x_{g1} + x_{g2} + x_{g3}$. The addition of the `genres` predictors has a negligible impact on the RMSE (in comparsion to the `userId` and `movieId` model).
+
+If a multi-effect model had to be selected, any option except the `Y = mu + x_g1 + x_g2 + x_g3` model would be a viable option.
+
+### Regularized Models
+Regularization is implemented with the tuning parameter $\lambda$ in increments of 0.5 such that $0 \le \lambda \le 10$. It uses the penalized least sum of squares to determine the most effective value of $\lambda$ for each model:
+
+```{r}
+# Define tuning parameter lambda
+lambdas <- seq(0, 10, 0.5)
+```
+
+#### Single Effect Models  
+
+The results of the following single-effect models are provided in the table below. A sample of the process of choosing the tuning parameter $\lambda$ is provided in Figure 24 for the `userId` model. From this plot, it follows that the value of $\lambda$ that provides the lowest RMSE is $\lambda = 5.5$. This method of cross validation is continued for the remainder of the single and multi-effect models.
+
+```{r single_effect2, echo=FALSE}
+## Regularized Models
+lambdas <- seq(0, 15, 0.5)
+
+## User effect only
+rmses_user <- sapply(lambdas, function(l){
+  b_u <- edx_train %>% group_by(userId) %>%
+    summarise(b_u = sum(rating - mu)/(n() + l))
+  
+  pred <- edx_test %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(y_ui = mu + b_u) %>%
+    pull(y_ui)
+  
+  return(RMSE(edx_test$rating, pred))
+})
+
+temp <- data.frame(lambdas = lambdas, rmses = rmses_user)
+temp %>% ggplot(aes(x=lambdas, y=rmses)) +
+  geom_point() +
+  xlab("Lambdas") +
+  ylab("RMSE") +
+  ggtitle("Figure 24. userId Regularized Model, Lambda Tuning") +
+  theme(text = element_text(family = "Times New Roman", size=10))
+
+reg_user_rmse <- min(rmses_user) # 0.9778
+lambda_user_rmse <- lambdas[which.min(rmses_user)] # lambda = 5.5
+
+## Movie effect only
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 2.5))
+  
+  pred <- edx_test %>%
+    left_join(b_i, by = "movieId") %>%
+    mutate(y_ui = mu + b_i) %>%
+    pull(y_ui)
+
+reg_movie_rmse <- RMSE(edx_test$rating, pred) # 0.94367
+lambda_movie_rmse <- 2.5 # lambda = 2.5
+
+## Movie year only
+  b_my <- edx_train %>% group_by(movie_year) %>%
+    summarise(b_my = sum(rating - mu)/(n() + 2.5))
+  
+  pred <- edx_test %>%
+    left_join(b_my, by = "movie_year") %>%
+    mutate(y_ui = mu + b_my) %>%
+    pull(y_ui)
+
+reg_movieyear_rmse <- RMSE(edx_test$rating, pred) # 0.94367
+lambda_movieyear_rmse <- 2.5
+
+# genres
+  g_ui <- edx_train %>% group_by(genres) %>%
+    summarise(g_ui = sum(rating - mu)/(n()+1))
+  genre_pred <- mu + edx_test %>% left_join(g_ui, by = "genres") %>% pull(g_ui)
+
+#qplot(lambdas, rmses_genres)
+reg_genre_rmse <- RMSE(edx_test$rating, genre_pred)
+lambda_genres_rmse <- 1
+
+# tabulate results
+d2 <- data.frame(predictor = c("none (naive)","userId", "movieId", "movie_year","genres"),
+           model_equation = c("Y = mu", "Y = mu + x_u", "Y = mu + x_i", "Y = mu + x_my", "Y = mu + x_g"),
+           lambda = c(0, lambda_user_rmse, lambda_movie_rmse, lambda_movieyear_rmse, lambda_genres_rmse),
+           RMSE = c(naive_model_RMSE, reg_user_rmse, reg_movie_rmse, reg_movieyear_rmse, reg_genre_rmse))
+d2[,2:4]
+
+```
+
+From this table, it is evident that regularization has an impact on the RMSE of the model. The RMSE of the `userId` model is `0.97780` (versus `0.97840`, unregularized) and `movieId` model is `0.94367` (versus `0.94374`, unregularized). In the same way as the un-regularized models, the `userId` and `movieId` have the greatest impact on the RMSE of the model. The RMSE of the `movie_year` predictor model has not changed, suggesting that there isn't much noise in the effects of this predictor. 
+
+#### Ensemble (multi-effect) Models
+
+```{r multi_effect2, echo=FALSE}
+
+## User and Movie Effect
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 5))
+  
+  b_u <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i)/(n() + 5))
+  
+  pred <- edx_test %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(y_ui = mu + b_i + b_u) %>%
+    pull(y_ui)
+  
+#qplot(lambdas, rmses_user_movie)
+reg_user_movie_rmse <- RMSE(edx_test$rating, pred) # 0.86524
+lambda_user_movie_rmse <- 5
+
+## User, Movie, Genres
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 5))
+  
+  b_u <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i)/(n() + 5))
+  
+  g_ui <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(genres) %>%
+    summarise(g_ui = sum(rating - mu - b_i - b_u)/(n() + 5))
+  
+  pred <- edx_test %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(g_ui, by = "genres") %>%
+    mutate(y_ui = mu + b_i + b_u + g_ui) %>%
+    pull(y_ui)
+  
+#qplot(lambdas, rmses_user_movie_genres)
+reg_user_movie_genre_rmse <- RMSE(edx_test$rating, pred) # 0.86494
+lambda_movie_genre_rmse <- 5
+
+## User, Movie, Movie Year
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 4.5))
+  
+  b_u <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i)/(n() + 4.5))
+  
+  b_my <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(movie_year) %>%
+    summarise(b_my = sum(rating - mu - b_i - b_u)/(n() + 4.5))
+  
+  pred <- edx_test %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_my, by = "movie_year") %>%
+    mutate(y_ui = mu + b_i + b_u + b_my) %>%
+    pull(y_ui)
+
+reg_user_movie_year_rmse <- RMSE(edx_test$rating, pred)
+lambda_user_movie_year_rmse <- 4.5
+
+## User, Movie, Genre_1, Genre_2, Genre_3
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 4.5))
+  
+  b_u <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i)/(n() + 4.5))
+  
+  g_ui1 <- t %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(genre_1) %>%
+    summarise(g_ui1 = sum(rating - mu - b_i - b_u)/(n() + 4.5))
+  
+  g_ui2 <- t %>% left_join(b_u, by = "userId") %>%
+    left_join(b_i_u, by = "movieId") %>%
+    left_join(g_ui_1, by = "genre_1") %>%
+    group_by(genre_2) %>%
+    summarise(g_ui2 = sum(rating - mu - b_u - b_i - g_ui1)/n())
+  
+  g_ui3 <- t %>% left_join(b_u, by = "userId") %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(g_ui_1, by = "genre_1") %>%
+    left_join(g_ui_2, by = "genre_2") %>%
+    group_by(genre_3) %>%
+    summarise(g_ui3 = sum(rating - mu - b_u - b_i - g_ui1 - g_ui2)/n())
+  
+  pred <- u %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(g_ui1, by = "genre_1") %>%
+    left_join(g_ui2, by = "genre_2") %>%
+    left_join(g_ui3, by = "genre_3") %>%
+    mutate(y_ui = mu + b_i + b_u + g_ui1 + g_ui2 + g_ui3) %>%
+    pull(y_ui)
+
+#qplot(lambdas, rmses_user_movie_genre123)
+reg_user_movie_genre123 <- RMSE(u$rating, pred) # 0.86563
+lambda_user_movie_genre123 <- 4.5
+
+## User, Movie, Genre_1
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 5))
+  
+  b_u <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i)/(n() + 5))
+  
+  g_ui1 <- t %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(genre_1) %>%
+    summarise(g_ui1 = sum(rating - mu - b_i - b_u)/(n() + 5))
+  
+  pred <- u %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(g_ui1, by = "genre_1") %>%
+    mutate(y_ui = mu + b_i + b_u + g_ui1) %>%
+    pull(y_ui)
+  
+#qplot(lambdas, rmses_user_movie_genre1)
+reg_user_movie_genre1_rmse <- RMSE(u$rating, pred) # 0.86514
+lambda_user_movie_genre1_rmse <- 5
+
+## User, Movie, Movie Year, Genres
+  b_i <- edx_train %>% group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu)/(n() + 4.5))
+  
+  b_u <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i)/(n() + 4.5))
+  
+  b_my <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    group_by(movie_year) %>%
+    summarise(b_my = sum(rating - mu - b_i - b_u)/(n() + 4.5))
+  
+  g_ui <- edx_train %>% left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_my, by = "movie_year") %>%
+    group_by(genres) %>%
+    summarise(g_ui = sum(rating - mu - b_i - b_u - b_my)/(n() + 4.5))
+  
+  pred <- edx_test %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_my, by = "movie_year") %>%
+    left_join(g_ui, by = "genres") %>%
+    mutate(y_ui = mu + b_i + b_u + b_my + g_ui) %>%
+    pull(y_ui)
+  
+reg_user_movie_year_genres_rmse <- RMSE(edx_test$rating, pred)
+lambda_user_movie_year_genres_rmse <- 4.5 
+
+# tabulate results
+d3 <- data.frame(predictors = c("none (naive)","userId, movieId", "userId, movieId, genres", 
+                                "userId, movieId, movie_year", "userId, movieId, genre_1, genre_2, genre_3", "userId, movieId, genre_1", "userId, movieId, genres, movie_year"),
+           model_equation = c("Y = mu", "Y = mu + x_u + x_i", "Y = mu + x_u + x_i + x_g", 
+                              "Y = mu + x_u + x_i + x_my", "Y = mu + x_u + x_i + x_g1 + x_g2 + x_g3",
+                              "Y = mu + x_u + x_i + x_g1", "Y = mu + x_u + x_i + x_g + x_my"),
+           lambda = c(0, lambda_user_movie_rmse, lambda_movie_genre_rmse, 
+                      lambda_user_movie_year_rmse, lambda_user_movie_genre123, 
+                      lambda_user_movie_genre1_rmse, lambda_user_movie_year_genres_rmse),
+           RMSE = c(naive_model_RMSE, reg_user_movie_rmse, reg_user_movie_genre_rmse,
+                    reg_user_movie_year_rmse, reg_user_movie_genre123, 
+                    reg_user_movie_genre1_rmse, reg_user_movie_year_genres_rmse))
+
+d3[, 2:4]
+
+```
+
+From this table, it follows that the best three linear models are:
+
+1. $Y = \mu + x_u + x_i + x_g$
+2. $Y = \mu + x_u + x_i + x_{g1}$
+3. $Y = \mu + x_u + x_i + x_g + x_{my}$
+
+#### Summary
+
+Comparing the RMSEs of the single-effect and multi-effect models (regularized and unregularized), the multi-effect model $Y = \mu + x_u + x_i + x_g + x_{my}$ will be used for the final model. This model gives the lowest RMSE (`0.86475`), and uses regularization parameter $\lambda = 4.5$.
+
+# Selected Model
+The selected model is a regularized multi-effect model with the # parameters: $Y = \mu + x_u + x_i + x_g + x_{my}$. It uses the regularization parameter $\lambda = 4.5$, and is implemented with the following code:
+
+```{r selected_model}
+
+## Selected Model
+# Predictors: User, Movie, Genres, Movie Year
+lambda <- 4.5
+mu <- mean(edx_train$rating)
+
+movie_effect <- edx_train %>% group_by(movieId) %>% 
+  summarise(b_i = sum(rating - mu)/(n() + lambda))
+user_effect <- edx_train %>% left_join(movie_effect, by = "movieId") %>%
+  group_by(userId) %>%
+  summarise(b_u = sum(rating - mu - b_i)/(n() + lambda))
+movie_year_effect <- edx_train %>% left_join(user_effect, by = "userId") %>%
+  left_join(movie_effect, by = "movieId") %>%
+  group_by(movie_year) %>%
+  summarise(b_my = sum(rating - mu - b_u - b_i)/(n() + lambda))
+genres_effect <- edx_train %>% left_join(user_effect, by = "userId") %>%
+  left_join(movie_effect, by = "movieId") %>%
+  left_join(movie_year_effect, by = "movie_year") %>%
+  group_by(genres) %>%
+  summarise(g_ui = sum(rating - mu - b_u - b_i - b_my)/(n() + lambda))
+  
+model <- validation %>% left_join(user_effect, by = "userId") %>%
+  left_join(movie_effect, by = "movieId") %>%
+  left_join(genres_effect, by = "genres") %>%
+  left_join(movie_year_effect, by = "movie_year") %>%
+  mutate(pred = mu + b_i + b_u + g_ui + b_my) %>%
+  pull(pred)
+
+## Validation RMSE
+RMSE(validation$rating, model)
+```
+
+This model gives an RMSE of **0.86475** when tested on the `edx_test` dataset, and **0.86516** when tested on the `validation` dataset.
+
+# Conclusion
+This report successfully implemented a linear effects machine learning model on the 10M MovieLens dataset. The final linear model used in this report was: $Y = \mu + x_u + x_i + x_g + x_{my}$, and a tuning parameter $\lambda = 4.5$ was used to regularize each predictor. The `userId` and `movieId` predictors consistently had the highest impact on the RMSE of the model. The selected model gives an RMSE of **0.86475** when tested on the `edx_test` dataset, and **0.86516** when tested on the `validation` dataset. A large portion of the RMSE can be attributed to the fact that the linear model was implemented by approximation: this is one of the main limitations of this project. In the future, the `lm()` function would be used (instead of an approximation) to create a machine learning model. Additional machine learning models could also be used, including dimension reduction (i.e., singular value decomposition) in order to reduce the number of predictors required in the model. The k-nearest neighbors algorithm and regression trees could also be viable options for the improvement of this project In summary, this project was a success.
